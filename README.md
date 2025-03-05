@@ -1,1 +1,1 @@
-A common space for all the scatered effort of datapod for inferenece time data generation.
+A common space for all the scattered effort of the datapod for inference time data generation.
