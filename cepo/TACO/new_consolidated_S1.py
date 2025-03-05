@@ -39,8 +39,8 @@ BASE_DIR = "/mlf-transfers-only/nishitn/inference_time_effort/cepo/TACO/s1_code"
 DIRS = {
     "generated": os.path.join(BASE_DIR, "generated_plans"),
     "executed": os.path.join(BASE_DIR, "executed_plans8"),
-    "analysed": os.path.join(BASE_DIR, "analysed_plans"),
-    "success": os.path.join(BASE_DIR, "success_rate_plans"),
+    "analysed": os.path.join(BASE_DIR, "analysed_plans_all_inout"),
+    "success": os.path.join(BASE_DIR, "success_rate_plans_all_inout"),
     "buckets": os.path.join(BASE_DIR, "buckets"),
 }
 for dir in DIRS.values():
@@ -408,14 +408,33 @@ async def answer_process_data(data, index):
         try:
             logging.info("Verifying executions")
             executor = TACOCodeExecutor()
-            execution_output = executor(data)
-            verification = execution_output["correct"]
+            verification_all_pairs = []
+            for entry in data:
+                inputs_outputs = json.loads(entry['answer'])
+                inputs = inputs_outputs["inputs"]
+                outputs = inputs_outputs["outputs"]
+                fn_name = entry.get("fn_name", None)
+                final_verdict = True
+                if isinstance(inputs, list):
+                    for i, j in zip(inputs, outputs):
+                        # Prepare the inputs_outputs in the form as they were but with just one input-output pair which will be at index i
+                        if fn_name:
+                            entry["answer"] = json.dumps({"inputs": [i], "outputs": [j], "fn_name": fn_name})
+                        else:
+                            entry["answer"] = json.dumps({"inputs": [i], "outputs": [j]})
+                        execution_output_single_pair = executor([entry])
+                        final_verdict = final_verdict and execution_output_single_pair["correct"]
+                        if not final_verdict:
+                            break
+                    verification_all_pairs.extend(final_verdict)
+            # execution_output = executor(data)
+            # verification = execution_output["correct"]
         except Exception as e:
             logging.error(f"Error during execution verification: {e}")
             raise e
 
         # Add verification results
-        for entry, verif_result in zip(data, verification):
+        for entry, verif_result in zip(data, verification_all_pairs):
             entry["is_correct"] = verif_result
 
         # Save analysed data as JSONL
@@ -508,8 +527,8 @@ async def main(dataset, problem_key, answer_key, batch_size=20):
     ## create batches of 20
     
     for index, batch in enumerate(range(0, len(dataset), batch_size)):
-        if index<14:
-            continue
+        # if index<14:
+        #     continue
         print(f"Processing batch {index}")
         await process_batch(dataset[batch:batch+batch_size], indices=list(range(batch, batch+batch_size)), problem_key=problem_key, answer_key=answer_key)
 
