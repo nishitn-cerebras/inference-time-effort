@@ -409,31 +409,46 @@ async def answer_process_data(data, index):
             logging.info("Verifying executions")
             executor = TACOCodeExecutor()
             verification_all_pairs = []
+            
             for entry in data:
                 inputs_outputs = json.loads(entry['answer'])
                 inputs = inputs_outputs["inputs"]
                 outputs = inputs_outputs["outputs"]
                 fn_name = entry.get("fn_name", None)
                 final_verdict = True
+
                 if isinstance(inputs, list):
                     for i, j in zip(inputs, outputs):
-                        # Prepare the inputs_outputs in the form as they were but with just one input-output pair which will be at index i
+                        # Prepare a single input-output pair
                         if fn_name:
                             entry["answer"] = json.dumps({"inputs": [i], "outputs": [j], "fn_name": fn_name})
                         else:
                             entry["answer"] = json.dumps({"inputs": [i], "outputs": [j]})
-                        execution_output_single_pair = executor([entry])
+
+                        try:
+                            execution_output_single_pair = executor([entry])
+                        except Exception as e:
+                            logging.error(f"Execution failed for entry {entry.get('problem_id', 'unknown')}: {e}")
+                            final_verdict = False
+                            break
+
                         final_verdict = final_verdict and execution_output_single_pair["correct"]
                         if not final_verdict:
                             break
-                    verification_all_pairs.extend(final_verdict)
-            # execution_output = executor(data)
-            # verification = execution_output["correct"]
+
+                    # Ensure final_verdict is always appended
+                    if isinstance(final_verdict, bool):  # Handle case where it's a boolean
+                        verification_all_pairs.append(final_verdict)
+                    else:
+                        verification_all_pairs.extend(final_verdict)
+
         except Exception as e:
             logging.error(f"Error during execution verification: {e}")
-            raise e
 
-        # Add verification results
+        # Ensure every entry gets an `is_correct` value
+        if len(data) != len(verification_all_pairs):
+            logging.warning(f"Mismatch in data size: {len(data)} vs {len(verification_all_pairs)}")
+        
         for entry, verif_result in zip(data, verification_all_pairs):
             entry["is_correct"] = verif_result
 
@@ -441,14 +456,21 @@ async def answer_process_data(data, index):
         os.makedirs(os.path.dirname(analysed_jsonl_path), exist_ok=True)
         with open(analysed_jsonl_path, "w") as f:
             for entry in data:
-                if entry['is_correct'] == "error":
+                if entry.get('is_correct') == "error":
                     continue
                 f.write(json.dumps(entry) + "\n")
 
         logging.info(f"Saved analysed data to {analysed_jsonl_path}")
+
         df = pd.DataFrame(data)
 
-    # Remove enrties where error occured while parsing input output
+    # Debugging: Check if "is_correct" exists
+    if "is_correct" not in df.columns:
+        logging.error("Column 'is_correct' is missing in DataFrame! Data might be malformed.")
+        logging.debug(df.head())  # Print some rows for debugging
+        return [], success_csv_path  # Return empty list to avoid further issues
+
+    # Remove entries where error occurred while parsing input-output
     df = df[df["is_correct"] != "error"]
 
     # Group data by problem_id and plan_id
@@ -458,7 +480,7 @@ async def answer_process_data(data, index):
         "question": "first",
         "answer": "first"
     }).reset_index()
- 
+
     df_grouped["reward"] = df_grouped["is_correct"].apply(map_success_to_reward)
 
     # Optimize CSV storage: Convert float64 to float32
@@ -512,6 +534,9 @@ async def process_batch(dataset, indices, problem_key, answer_key):
         executed_plan = await coro
         logging.info(f"Analysing plan for index {executed_plan[0]['problem_id']}")
         data_grouped, analysed_file_path = await answer_process_data(executed_plan, executed_plan[0]['problem_id'])
+        if data_grouped is None and analysed_file_path is None:
+            logging.error(f"Error in processing batch for index {executed_plan[0]['problem_id']}. Skipping...")
+            continue
         logging.info(f"analysed Done for index ")
         save_buckets(data_grouped)
 
@@ -527,8 +552,8 @@ async def main(dataset, problem_key, answer_key, batch_size=20):
     ## create batches of 20
     
     for index, batch in enumerate(range(0, len(dataset), batch_size)):
-        # if index<14:
-        #     continue
+        if index<17:
+            continue
         print(f"Processing batch {index}")
         await process_batch(dataset[batch:batch+batch_size], indices=list(range(batch, batch+batch_size)), problem_key=problem_key, answer_key=answer_key)
 
