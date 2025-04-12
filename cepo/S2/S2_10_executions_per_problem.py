@@ -139,6 +139,7 @@ async def main():
 
     plans_with_less_execution = 0
     problems_with_no_execution = 0
+    probloems_with_no_plan = 0
 
     for file in tqdm(intersected_files):
         if os.path.basename(file).startswith("cb_log_"):
@@ -152,8 +153,20 @@ async def main():
             if problem_number in processed_problem_ids:
                 print(f"Skipping already processed problem {problem_number}")
                 continue
+            
+            # get question_text from any of the completed plan
+            question_text = None
+            for i in range(3):
+                for j in range(3):
+                    if data[f'completion_{i}_log'].get(f'messages_planning_{j}', False):
+                        question_text = data[f'completion_{i}_log']['messages_planning_{j}'][1]['content']
+                        break
+                if question_text:
+                    break
+            if question_text is None:
+                probloems_with_no_plan += 1
+                continue
 
-            question_text = data['completion_0_log']['messages_planning_0'][1]['content']
             prefix = "Read the question again:\n\n"
             question = question_text.split(prefix, 1)[1].strip() if prefix in question_text else ""
             ground_truth = data['answer']
