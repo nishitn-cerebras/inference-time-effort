@@ -473,14 +473,10 @@ async def process_batch(dataset, indices, problem_key, answer_key):
     executions_plans = []
     for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks)):
         executed_plan = await coro
-        try:
-            logging.info(f"Analysing plan for index {executed_plan[0]['problem_id']}")
-        except Exception as e:
-            print("Error in analysing plan", e)
-            print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
-            print(executed_plan)
-            print("#############################################")
-            sys.exit(0)
+        if executed_plan == []:
+            continue
+
+        logging.info(f"Analysing plan for index {executed_plan[0]['problem_id']}")
         ### analysed file_path
         data_grouped, analysed_file_path = await answer_process_data(executed_plan, executed_plan[0]['problem_id'])
         logging.info(f"analysed Done for index ")
