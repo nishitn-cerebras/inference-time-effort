@@ -10,6 +10,8 @@ import numpy as np
 from openai import AsyncClient , OpenAI
 import aiofiles
 import pandas as pd
+import re
+import sys
 # Logging Setup
 LOG_DIR = "../logs"
 os.makedirs(LOG_DIR, exist_ok=True)
@@ -30,7 +32,7 @@ from math_verify import parse, verify
 concurrent_tasks = 20
 
 # Define directories
-BASE_DIR = "/mlf-transfers-only/harshg1/inference-time-effort/CePO/NuminaMath_low_success_samples_new_prompt/"
+BASE_DIR = "data"
 DIRS = {
     "generated": os.path.join(BASE_DIR, "generated_plans"),
     "executed": os.path.join(BASE_DIR, "executed_plans"),
@@ -44,9 +46,9 @@ for dir in DIRS.values():
 
 # Model settings
 api_key = "serving-on-vllm"
-model = "meta-llama/Llama-3.3-70B-Instruct"
+model = "Qwen/Qwen3-8B"
 # model = "/home/ivanl/mlf2/magpieskyt1dsthinkv2cepos1v2s2_llama3p3_70b_ftrev2/"
-base_url = "http://127.0.0.1:9800/"
+base_url = "http://127.0.0.1:9007/"
 client = Cerebras(api_key=api_key, base_url=base_url)
 
 # Configuration
@@ -58,9 +60,9 @@ if USE_CS:
     base_client = Cerebras(api_key=api_key)
 else:  # MLF vLLM
     api_key = "serving-on-vllm"
-    model = "meta-llama/Llama-3.3-70B-Instruct"
+    model = "Qwen/Qwen3-8B"
     # model = "/home/ivanl/mlf2/magpieskyt1dsthinkv2cepos1v2s2_llama3p3_70b_ftrev2/"
-    base_client = Cerebras(api_key=api_key, base_url="http://127.0.0.1:8011/")
+    base_client = Cerebras(api_key=api_key, base_url="http://127.0.0.1:8055/")
 
 
 
@@ -90,7 +92,7 @@ def make_json_serializable(dataset):
 # Semaphore for controlling concurrent requests
 request_semaphore = asyncio.Semaphore(100)
 # Semaphore for limiting the number of concurrent tasks
-semaphore = asyncio.Semaphore(20) # Limit to concurrent tasks
+semaphore = asyncio.Semaphore(5) # Limit to concurrent tasks
 file_semaphore = asyncio.Semaphore(10) # Limit to concurrent file operations
 completed_logs ={}
 
@@ -109,7 +111,7 @@ async def call_to_vllm(prompt, temperature=0.75, cb_log_required=False):
                         model=model,
                         messages=[{"role": "user", "content": prompt}],
                         stream=False,
-                        timeout=1000,
+                        timeout=100000,
                     )
                 )
                     return response.cb_log
@@ -119,7 +121,7 @@ async def call_to_vllm(prompt, temperature=0.75, cb_log_required=False):
                         model=model,
                         messages=prompt,
                         stream=False,
-                        timeout=1000,
+                        timeout=100000,
                         temperature=temperature,
                     )
                 )
@@ -133,21 +135,16 @@ async def call_to_vllm(prompt, temperature=0.75, cb_log_required=False):
                 return None
 
 
-
 def get_dataset(dataset_name="AI-MO/NuminaMath-1.5", num_samples=10500, indices=None):
     math_train = load_dataset(dataset_name, split="train")
     logging.info(f"Loaded dataset with {len(math_train)} samples")
     math_train = math_train.filter(lambda x: x['answer'] and "notfound" not in x['answer'] and "proof" not in x['answer'] and x['question_type'] == 'math-word-problem')
     logging.info(f"Filtered dataset to {len(math_train)} samples")
-    math_train = math_train.shuffle(seed=42).select(range(min(num_samples, len(math_train))))
+    math_train = math_train.select(range(min(num_samples, len(math_train))))
     if indices:
         math_train = math_train.select(indices)
     logging.info(f"Selected {len(math_train)} samples")
-    return math_train, "problem", "solution"
-
-# def get_low_success_rate_dataset():
-#     dataset = json.load(open("low_success_rate_dataset.json"))
-#     return dataset, "question", "answer"
+    return math_train, "problem", "answer"
 
 
 def get_completed_files(output_dir, no_of_samples):
@@ -155,11 +152,6 @@ def get_completed_files(output_dir, no_of_samples):
     completed_indices = {int(f.replace("cb_log_", "").replace(".json", "")) for f in completed_files}
     incompleted_indices = [i for i in range(no_of_samples) if i not in completed_indices]
     return completed_files, completed_indices, incompleted_indices
-
-
-
-
-
 
 
 async def generate_plans(dataset, indices, problem_key, answer_key):
@@ -170,7 +162,7 @@ async def generate_plans(dataset, indices, problem_key, answer_key):
             return await read_json_async(cb_log_path), cb_log_path
 
         logging.info(f"Generating plan for index {index}")
-        cb_log = await call_to_vllm(sample[problem_key]+' $$ Answer $$ '+ sample[answer_key], cb_log_required=True)
+        cb_log = await call_to_vllm(sample[problem_key], cb_log_required=True)
         if cb_log is None:
             return None, None
         # logging.info("Sample answer key", sample[answer_key], index)
@@ -201,9 +193,9 @@ async def execute_plans(cb_log, index):
         return await read_json_async(f"{DIRS['executed']}/problem_{index}.json")
     async def execute_task(plan_i, sub_log):
         try:
-            messages[1]['content'] = f"To answer this question, can you come up with a concise plan to solve it step-by-step, so that you can come up with accurate plan but do not provide the "\
-                  f"final answer. Also, for each step, provide your confidence in the correctness of that step as well as your ability "\
-                  f"to execute it correctly. Here is the question:\n{question}\nRead the question again:\n\n{question}"
+            # messages[1]['content'] = f"To answer this question, can you come up with a concise plan to solve it step-by-step, so that you can come up with accurate plan but do not provide the "\
+            #       f"final answer. Also, for each step, provide your confidence in the correctness of that step as well as your ability "\
+            #       f"to execute it correctly. Here is the question:\n{question}\nRead the question again:\n\n{question}"
             
             messages = cb_log[sub_log][plan_i]       
             messages[3]['content'] += " <Answer> your final answer here </Answer>."
@@ -486,7 +478,14 @@ async def process_batch(dataset, indices, problem_key, answer_key):
     executions_plans = []
     for coro in tqdm(asyncio.as_completed(tasks), total=len(tasks)):
         executed_plan = await coro
-        logging.info(f"Analysing plan for index {executed_plan[0]['problem_id']}")
+        try:
+            logging.info(f"Analysing plan for index {executed_plan[0]['problem_id']}")
+        except Exception as e:
+            print("Error in analysing plan", e)
+            print("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+            print(executed_plan)
+            print("#############################################")
+            sys.exit(0)
         ### analysed file_path
         data_grouped, analysed_file_path = await answer_process_data(executed_plan, executed_plan[0]['problem_id'])
         logging.info(f"analysed Done for index ")
@@ -494,35 +493,27 @@ async def process_batch(dataset, indices, problem_key, answer_key):
         ### getting data into buckets ###
         save_buckets(data_grouped)
 
-
-        
-
-
-
-    
     # process_buckets(analysis_csv_path, plan_directory)
 
 async def main(dataset, problem_key, answer_key, batch_size=20):
     ## create batches of 20
-    
     for index, batch in enumerate(range(0, len(dataset), batch_size)):
         print(f"Processing batch {index}")
-        await process_batch(dataset[batch:batch+batch_size], indices=list(range(batch, batch+batch_size)), problem_key=problem_key, answer_key=answer_key)
+        await process_batch(
+                            dataset[batch:min(batch + batch_size, len(dataset))], 
+                            indices=list(range(batch, min(batch + batch_size, len(dataset)))), 
+                            problem_key=problem_key, 
+                            answer_key=answer_key
+                        )
 
 if __name__=='__main__':
-
-    ## get dataset
-    indices_list = None
-    with open('/mlf-transfers-only/harshg1/zero_entries_problems.json', 'r') as outfile:
-        indices_list = json.load(outfile)
-
-    math_train , problem_key, answer_key = get_dataset("AI-MO/NuminaMath-1.5",indices=indices_list)
+    # load dataset
+    math_train , problem_key, answer_key = get_dataset("AI-MO/NuminaMath-1.5")
     math_train = make_json_serializable(math_train)
     completed_files, completed_indices, incompleted_indices = get_completed_files(DIRS["generated"], len(math_train))
     print(f"Found {len(completed_files)} completed files and {len(incompleted_indices)} incompleted files")
 
-    ############################################################################################################
-    ## process and save data
+    # process and save data
     asyncio.run(main(math_train, problem_key, answer_key, batch_size=10))
     
 

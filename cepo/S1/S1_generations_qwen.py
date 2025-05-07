@@ -99,7 +99,7 @@ completed_logs ={}
 
 async def call_to_vllm(prompt, temperature=0.75, cb_log_required=False):
     """Handles API calls with retry logic"""
-    MAX_RETRIES = 2
+    MAX_RETRIES = 6
     RETRY_DELAY = 4  # seconds
     logging.info(f"Calling VLLM with prompt with cb_log_required={cb_log_required}")
     for attempt in range(MAX_RETRIES):
@@ -192,13 +192,8 @@ async def execute_plans(cb_log, index):
         logging.info(f"Executions already exist for problem {index}")
         return await read_json_async(f"{DIRS['executed']}/problem_{index}.json")
     async def execute_task(plan_i, sub_log):
-        try:
-            messages[1]['content'] = f"To answer this question, can you come up with a concise plan to solve it step-by-step, so that you can come up with accurate plan but do not provide the "\
-                  f"final answer. Also, for each step, provide your confidence in the correctness of that step as well as your ability "\
-                  f"to execute it correctly. Here is the question:\n{question}\nRead the question again:\n\n{question}"
-            
-            messages = cb_log[sub_log][plan_i]       
-            messages[3]['content'] += " <Answer> your final answer here </Answer>."
+        try:            
+            messages = cb_log[sub_log][plan_i] 
             tasks = [call_to_vllm(messages[:4], temperature) for _ in range(1, 10)]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
@@ -514,7 +509,7 @@ if __name__=='__main__':
     print(f"Found {len(completed_files)} completed files and {len(incompleted_indices)} incompleted files")
 
     # process and save data
-    asyncio.run(main(math_train, problem_key, answer_key, batch_size=10))
+    asyncio.run(main(math_train, problem_key, answer_key, batch_size=1))
     
 
 
