@@ -1,6 +1,6 @@
 from bespokelabs import curator
 from datasets import load_dataset, Dataset
-from typing import List, Dict
+from typing import List, Dict, Tuple
 import os
 import json
 from tqdm import tqdm
@@ -77,6 +77,36 @@ def chunks(iterable, batch_size):
     for i in range(0, len(iterable), batch_size):
         yield iterable[i:i + batch_size]
 
+def verify_executions_for_question(executions: List[Dict]) -> Tuple[List[List[int]], List[float]]:
+    """
+    Verify a list of 90 executions (for 9 plans × 10 executions each).
+    Each execution is a dict with keys: 'execution' and 'answer'.
+
+    Returns:
+        - verification_results: List of 9 lists (each 10 ints of 0/1)
+        - success_rates: List of 9 floats
+    """
+    assert len(executions) == 90, "Expected 90 executions (9 plans × 10 executions)."
+
+    data = Dataset.from_list(executions)
+
+    try:
+        from code_execution_taco import process_dataset_parallel
+        result = process_dataset_parallel(data, batch_size=45)
+    except Exception as e:
+        print(f"Error during execution verification: {e}")
+        raise
+
+    correctness = result["correctness"]  # List[int] of length 90
+
+    # Group into 9 lists of 10
+    verification_results = [correctness[i*10:(i+1)*10] for i in range(9)]
+
+    # Compute success rate per plan
+    success_rates = [sum(group)/10.0 for group in verification_results]
+
+    return verification_results, success_rates
+
 # === Main Function ===
 def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=10, output_dir="output"):
     os.makedirs(output_dir, exist_ok=True)
@@ -89,17 +119,59 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
         for row in batch:
             index = row["index"]
             data_path = os.path.join(output_dir, f"question_{index:06d}.jsonl")
+
             if os.path.exists(data_path):
-                print(f"Skipping existing file: {data_path}")
-                continue
+                with open(data_path, "r") as f:
+                    try:
+                        content = json.loads(f.readline().strip())
+                        plans = content.get("plans_and_executions", [])
+
+                        # Case 1: All verified → skip
+                        if all("verification" in p and "plan_success_rate" in p for p in plans):
+                            print(f"Skipping verified file: {data_path}")
+                            continue
+
+                        # Case 2: Plans present but missing verification → bulk verify
+                        elif all("executions" in p for p in plans):
+                            print(f"Adding verification to incomplete file: {data_path}")
+
+                            # Prepare 90 dicts: {execution, answer}
+                            all_exec_items = [
+                                {"execution": exec, "answer": content["input_output"]}
+                                for p in plans for exec in p["executions"]
+                            ]
+
+                            verification_lists, success_rates = verify_executions_for_question(all_exec_items)
+
+                            for i, p in enumerate(plans):
+                                p["verification"] = verification_lists[i]
+                                p["plan_success_rate"] = success_rates[i]
+
+                            content["plans_and_executions"] = plans
+                            with open(data_path, "w") as f_out:
+                                f_out.write(json.dumps(content) + "\n")
+                            continue
+
+                        else:
+                            print(f"Incomplete or corrupted file: {data_path} — reprocessing")
+
+                    except Exception as e:
+                        print(f"Error reading {data_path}: {e}")
+                        continue
+
+            # Case 3: File missing or needs full generation
             question = row["question"]
             input_output = row["input_output"]
-            index = row["index"]
-            base = {"index": index, "source": row["source"], "question": question, "input_output": input_output}
+            base = {
+                "index": index,
+                "source": row["source"],
+                "question": question,
+                "input_output": input_output
+            }
             base_inputs.append(base)
             batch_plan_inputs.extend([base] * 9)
 
-        if not batch_plan_inputs:
+        if not base_inputs:
             print("No new inputs to process in this batch.")
             continue
 
@@ -108,7 +180,7 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
 
         exec_inputs = []
         for i, base in enumerate(base_inputs):
-            plans = [plan_outputs[9*i + j]["plan"] for j in range(9)]
+            plans = [plan_outputs[9 * i + j]["plan"] for j in range(9)]
             for plan in plans:
                 exec_inputs.extend([
                     {
@@ -124,13 +196,27 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
         idx = 0
         for i, base in enumerate(base_inputs):
             plans_with_executions = []
+            all_executions = []
+
             for j in range(9):
-                plan = plan_outputs[9*i + j]["plan"]
                 executions = [exec_outputs[idx + k]["execution"] for k in range(10)]
                 idx += 10
+                all_executions.append(executions)
+
+            # Flatten executions for verification
+            flat_exec_items = [
+                {"execution": exec, "answer": base["input_output"]}
+                for group in all_executions for exec in group
+            ]
+            verification_lists, success_rates = verify_executions_for_question(flat_exec_items)
+
+
+            for j in range(9):
                 plans_with_executions.append({
-                    "plan": plan,
-                    "executions": executions
+                    "plan": plan_outputs[9 * i + j]["plan"],
+                    "executions": all_executions[j],
+                    "verification": verification_lists[j],
+                    "plan_success_rate": success_rates[j]
                 })
 
             question_result = {
@@ -141,8 +227,7 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
                 "plans_and_executions": plans_with_executions
             }
 
-            index = base["index"]
-            question_path = os.path.join(output_dir, f"question_{index:06d}.jsonl")
+            question_path = os.path.join(output_dir, f"question_{base['index']:06d}.jsonl")
             with open(question_path, "w") as f:
                 f.write(json.dumps(question_result) + "\n")
 
