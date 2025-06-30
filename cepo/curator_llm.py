@@ -62,6 +62,8 @@ def get_skywork_dataset(test=False):
     }, remove_columns=data_train.column_names)
 
     data_train = data_train.filter(lambda x: 'taco' in x['source'].lower())
+    # get only hard examples
+    data_train = data_train.filter(lambda x: x['source']=="train-code-taco-hard")
 
     if test:
         df = data_train.to_pandas()
@@ -232,7 +234,7 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
                 f.write(json.dumps(question_result) + "\n")
 
 # === Run ===
-dataset = get_skywork_dataset(test=True)
+dataset = get_skywork_dataset()
 
 plan_llm = PlanGenerator(
     model_name="Qwen/Qwen3-8B",
