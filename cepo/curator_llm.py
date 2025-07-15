@@ -31,6 +31,8 @@ class PlanExecutor(curator.LLM):
         ]
         if self.domain == 'code':
             messages.append({"role": "user", "content": self.get_execution_prompt_code(row['ground_truth'])})
+        elif self.domain == 'science-arc':
+            messages.append({"role": "user", "content": self.get_execution_prompt_science_arc()})
         else:
             messages.append({"role": "user", "content": self.get_execution_prompt_math()})
         return messages
@@ -61,6 +63,11 @@ class PlanExecutor(curator.LLM):
         return f"Can you execute the above plan step-by-step to produce the final answer. "\
                 f"Be extra careful when executing steps where your confidence is lower."\
                 f"Provide your final answer in the format: `The answer is:  \\boxed{{}}`.\n"
+    
+    def get_execution_prompt_science_arc(self):
+        return f"Can you execute the above plan step-by-step to produce the final answer. "\
+                f"Be extra careful when executing steps where your confidence is lower."\
+                f"Provide your final label answer in the format: `The answer is:  \\boxed{{}}`.\n"
 
 # === Dataset Loader with Stable Indexing ===
 def get_skywork_dataset_code(test=False):
@@ -113,6 +120,27 @@ def get_skywork_dataset_math(test=False):
     print("With keys:", data_train[0].keys())
     return data_train
 
+def get_arc_dataset_science(test=False):
+    data_train = load_dataset("allenai/ai2_arc", name="ARC-Challenge", split='train')
+
+    data_train = data_train.map(lambda x, idx: {"index": idx}, with_indices=True)
+
+    # Transform fields
+    data_train = data_train.map(lambda x: {
+        "question": x["question"] + f"\nChoices:\n{x['choices']}",
+        "ground_truth": x['answerKey'],
+        "source": x["id"],
+        "index": x["index"]  # preserve index
+    }, remove_columns=data_train.column_names)
+
+    if test:
+        df = data_train.to_pandas()
+        df_subset = df.head(1)
+        data_train = Dataset.from_pandas(df_subset)
+
+    print(f"Loaded {len(data_train)} examples from ARC Science dataset.")
+    print("With keys:", data_train[0].keys())
+    return data_train
 # === Utility ===
 def chunks(iterable, batch_size):
     for i in range(0, len(iterable), batch_size):
@@ -177,6 +205,42 @@ def verify_executions_for_question_math(executions: List[Dict]) -> Tuple[List[Li
 
             gt = parse(f"$${gt_list[0]}$$")
 
+            correct = verify(gt, pred)
+            results.append(1 if correct else 0)
+
+        except Exception as e:
+            # Failed to parse or verify
+            results.append(-100)  # Use -100 to indicate failure
+
+    # Split into 9 groups of 10
+    verification_results = [results[i * 10:(i + 1) * 10] for i in range(9)]
+    success_rates = [sum(group) / 10.0 for group in verification_results]
+
+    print(f"Total sucessful executions: {sum(results)} out of 90")
+
+    return verification_results, success_rates
+
+def verify_executions_for_question_arc_science(executions: List[Dict]) -> Tuple[List[List[int]], List[float]]:
+    """
+    Verifies math plan executions using symbolic parsing.
+
+    Args:
+        executions: List of 90 dicts with keys:
+                    - 'execution': model-generated response
+                    - 'answer': ground truth (should be a JSON list with one item)
+
+    Returns:
+        Tuple containing:
+        - verification_results: List of 9 lists of 10 ints (1 if correct, 0 otherwise)
+        - success_rates: List of 9 floats (fraction of correct executions per plan)
+    """
+    assert len(executions) == 90, "Expected 90 executions (9 plans × 10 executions)."
+
+    results = []
+    for i, row in enumerate(executions):
+        try:
+            pred = parse(row['execution'])
+            gt = row['answer']
             correct = verify(gt, pred)
             results.append(1 if correct else 0)
 
@@ -283,6 +347,8 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
                             ]
                             if domain == 'code':
                                 verification_lists, success_rates = verify_executions_for_question_code(all_exec_items)
+                            elif domain == 'science-arc':
+                                verification_lists, success_rates = verify_executions_for_question_arc_science(all_exec_items)
                             else:
                                 verification_lists, success_rates = verify_executions_for_question_math(all_exec_items)
 
@@ -316,11 +382,11 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
             continue
 
         plan_outputs = plan_llm(batch_plan_inputs)
-        assert len(plan_outputs) == 9 * len(base_inputs)
+        assert len(plan_outputs.dataset) == 9 * len(base_inputs)
 
         exec_inputs = []
         for i, base in enumerate(base_inputs):
-            plans = [plan_outputs[9 * i + j]["plan"] for j in range(9)]
+            plans = [plan_outputs.dataset[9 * i + j]["plan"] for j in range(9)]
             for plan in plans:
                 exec_inputs.extend([{
                     "question": base["question"],
@@ -329,7 +395,7 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
                 }] * 10)
 
         exec_outputs = exec_llm(exec_inputs)
-        assert len(exec_outputs) == 90 * len(base_inputs)
+        assert len(exec_outputs.dataset) == 90 * len(base_inputs)
 
         idx = 0
         for i, base in enumerate(base_inputs):
@@ -337,7 +403,7 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
             all_executions = []
 
             for j in range(9):
-                executions = [exec_outputs[idx + k]["execution"] for k in range(10)]
+                executions = [exec_outputs.dataset[idx + k]["execution"] for k in range(10)]
                 idx += 10
                 all_executions.append(executions)
 
@@ -347,11 +413,13 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
             ]
             if domain == 'code':
                 verification_lists, success_rates = verify_executions_for_question_code(flat_exec_items)
+            elif domain == 'science-arc':
+                verification_lists, success_rates = verify_executions_for_question_arc_science(flat_exec_items)
             else:
                 verification_lists, success_rates = verify_executions_for_question_math(flat_exec_items)
 
             for j in range(9):
-                plan_text = plan_outputs[9 * i + j]["plan"]
+                plan_text = plan_outputs.dataset[9 * i + j]["plan"]
                 executions = all_executions[j]
                 verification = verification_lists[j]
                 success_rate = success_rates[j]
@@ -392,20 +460,27 @@ def generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=
 # === Run ===
 def parse_args():
     parser = argparse.ArgumentParser(description="Plan generation and execution with bucketing.")
-    parser.add_argument("--domain", choices=["code", "math"], required=True, help="Domain to run: code or math")
+    parser.add_argument("--domain", choices=["code", "math", "science-arc"], required=True, help="Domain to run: code, math or science-arc")
     return parser.parse_args()
 
 def main():
     args = parse_args()
     domain = args.domain
+    dataset = None
 
-    dataset = get_skywork_dataset_math(test=True) if domain == 'math' else get_skywork_dataset_code()
+    match domain:
+        case 'code':
+            dataset = get_skywork_dataset_code()
+        case 'math':
+            dataset = get_skywork_dataset_math(test=True)
+        case _:
+            dataset = get_arc_dataset_science()
 
     plan_llm = PlanGenerator(
         model_name="Qwen/Qwen3-8B",
         backend="openai",
         backend_params={
-            "base_url": "http://localhost:8055/v1",
+            "base_url": "http://localhost:8190/v1",
             "api_key": "serving-on-vllm",
             "max_requests_per_minute": 20,
             "max_tokens_per_minute": 20 * 1024 * 64,
@@ -419,7 +494,7 @@ def main():
         model_name="Qwen/Qwen3-8B",
         backend="openai",
         backend_params={
-            "base_url": "http://localhost:8055/v1",
+            "base_url": "http://localhost:8190/v1",
             "api_key": "serving-on-vllm",
             "max_requests_per_minute": 20,
             "max_tokens_per_minute": 20 * 1024 * 64,
@@ -430,8 +505,8 @@ def main():
         domain=domain
     )
 
-    output_dir = f"/mnt/local/shared/nishitn/cepo/TACO/skywork_curator_{domain}"
-    generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=10, output_dir=output_dir, domain=domain)
+    output_dir = f"/data/home/amaand/mlf2/{domain}_challenge"
+    generate_and_execute_plan_batchwise(dataset, plan_llm, exec_llm, batch_size=1, output_dir=output_dir, domain=domain)
 
 if __name__ == "__main__":
     main()
