@@ -35,5 +35,5 @@ def aggregate_plan_success_rates(jsonl_dir):
     return rows
 
 if __name__ == "__main__":
-    output_dir = "/cb/cold2/nishitn/mlftmp3_copied/skywork_curator"
+    output_dir = "/cb/cold2/nishitn/mlftmp3_copied/skywork_curator_code"
     aggregate_plan_success_rates(output_dir)
